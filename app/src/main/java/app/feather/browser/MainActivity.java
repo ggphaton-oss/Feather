@@ -1,5 +1,6 @@
 package app.feather.browser;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
@@ -9,6 +10,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -32,7 +34,8 @@ import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
-import android.webkit.DownloadListener;
+import android.webkit.GeolocationPermissions;
+import android.webkit.PermissionRequest;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -120,6 +123,10 @@ public class MainActivity extends Activity {
     WebChromeClient.CustomViewCallback customCb;
     ValueCallback<Uri[]> fileCb;
     String mobileUa, desktopUa, homeLogo;
+    static final int RQ_GEO = 78, RQ_MEDIA = 79;
+    GeolocationPermissions.Callback geoCb;
+    String geoOrigin;
+    PermissionRequest mediaReq;
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -675,6 +682,16 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {
+                askGeo(origin, cb);
+            }
+
+            @Override
+            public void onPermissionRequest(PermissionRequest req) {
+                askMedia(req);
+            }
+
+            @Override
             public void onShowCustomView(View view, CustomViewCallback cb) {
                 if (customView != null) { cb.onCustomViewHidden(); return; }
                 customView = view;
@@ -692,6 +709,87 @@ public class MainActivity extends Activity {
                 hideCustom();
             }
         });
+    }
+
+    // ------------------------------------------------------------------ site permissions
+
+    boolean has(String perm) {
+        return checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    void askGeo(final String origin, final GeolocationPermissions.Callback cb) {
+        dlg().setTitle("Location")
+                .setMessage(hostOf(origin) + " wants to know your location.")
+                .setPositiveButton("Allow", (d, w) -> {
+                    if (has(Manifest.permission.ACCESS_FINE_LOCATION)
+                            || has(Manifest.permission.ACCESS_COARSE_LOCATION)) {
+                        cb.invoke(origin, true, false);
+                    } else {
+                        geoOrigin = origin;
+                        geoCb = cb;
+                        requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.ACCESS_COARSE_LOCATION}, RQ_GEO);
+                    }
+                })
+                .setNegativeButton("Block", (d, w) -> cb.invoke(origin, false, false))
+                .setOnCancelListener(d -> cb.invoke(origin, false, false))
+                .show();
+    }
+
+    void askMedia(final PermissionRequest req) {
+        boolean cam = false, mic = false;
+        for (String r : req.getResources()) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) cam = true;
+            else if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) mic = true;
+        }
+        if (!cam && !mic) { req.deny(); return; }
+        String what = cam && mic ? "camera and microphone" : cam ? "camera" : "microphone";
+        dlg().setTitle("Allow " + what + "?")
+                .setMessage(hostOf(req.getOrigin().toString()) + " wants to use your " + what + ".")
+                .setPositiveButton("Allow", (d, w) -> {
+                    ArrayList<String> need = new ArrayList<>();
+                    for (String r : req.getResources()) {
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r) && !has(Manifest.permission.CAMERA))
+                            need.add(Manifest.permission.CAMERA);
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r) && !has(Manifest.permission.RECORD_AUDIO))
+                            need.add(Manifest.permission.RECORD_AUDIO);
+                    }
+                    if (need.isEmpty()) {
+                        finishMedia(req);
+                    } else {
+                        mediaReq = req;
+                        requestPermissions(need.toArray(new String[0]), RQ_MEDIA);
+                    }
+                })
+                .setNegativeButton("Block", (d, w) -> req.deny())
+                .setOnCancelListener(d -> req.deny())
+                .show();
+    }
+
+    // grants only the resources whose Android permission is actually held
+    void finishMedia(PermissionRequest req) {
+        ArrayList<String> ok = new ArrayList<>();
+        for (String r : req.getResources()) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r) && has(Manifest.permission.CAMERA)) ok.add(r);
+            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r) && has(Manifest.permission.RECORD_AUDIO)) ok.add(r);
+        }
+        if (ok.isEmpty()) req.deny();
+        else req.grant(ok.toArray(new String[0]));
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int rc, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(rc, perms, results);
+        if (rc == RQ_GEO && geoCb != null) {
+            boolean ok = false;
+            for (int r : results) if (r == PackageManager.PERMISSION_GRANTED) ok = true;
+            geoCb.invoke(geoOrigin, ok, false);
+            geoCb = null;
+            geoOrigin = null;
+        } else if (rc == RQ_MEDIA && mediaReq != null) {
+            finishMedia(mediaReq);
+            mediaReq = null;
+        }
     }
 
     void hideCustom() {
